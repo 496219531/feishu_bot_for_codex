@@ -1,0 +1,5 @@
+.env.feishu
+.feishu-codex-bot-state.json
+feishu-bot.log
+feishu-tunnel.log
+feishu-tunnel.url
