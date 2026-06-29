@@ -54,7 +54,11 @@ PORT=${port}
 WORKSPACE_DIR=${workspace_dir}
 
 CODEX_BIN=codex
-# CODEX_MODEL=gpt-5.3-codex
+CODEX_EXEC_MODE=config
+
+# 留空表示直接使用 ~/.codex/config.toml 里的模型与推理配置
+# CODEX_MODEL=
+# CODEX_REASONING_EFFORT=
 
 STATE_FILE=${ROOT_DIR}/.feishu-codex-bot-state.json
 MAX_TEXT_CHARS=1800

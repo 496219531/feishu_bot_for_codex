@@ -1,0 +1,8 @@
+{
+  "name": "feishu-bot-for-codex",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@larksuiteoapi/node-sdk": "^1.62.0"
+  }
+}

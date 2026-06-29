@@ -2,10 +2,10 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-ENV_FILE="${ENV_FILE:-$ROOT_DIR/.env.feishu}"
-SESSION_NAME="${SESSION_NAME:-feishu-codex}"
-LOG_FILE="${LOG_FILE:-$ROOT_DIR/feishu-bot.log}"
-PORT="${PORT:-8787}"
+ENV_FILE="${ENV_FILE:-$ROOT_DIR/.env.feishu.hermes}"
+SESSION_NAME="${SESSION_NAME:-feishu-hermes}"
+LOG_FILE="${LOG_FILE:-$ROOT_DIR/feishu-hermes-bot.log}"
+PORT="${PORT:-8788}"
 NODE_BIN="${NODE_BIN:-$(command -v node || true)}"
 
 if ! command -v tmux >/dev/null 2>&1; then
@@ -20,7 +20,6 @@ fi
 
 if [ ! -f "$ENV_FILE" ]; then
   echo "[fatal] env file not found: $ENV_FILE"
-  echo "Create it with: $ROOT_DIR/scripts/feishu-bot-init.sh"
   exit 1
 fi
 
@@ -36,12 +35,11 @@ fi
 
   if [ -z "$app_id" ] || [ -z "$app_secret" ]; then
     echo "[fatal] missing App ID/Secret in $ENV_FILE"
-    echo "Set FEISHU_APP_ID/FEISHU_APP_SECRET (or APP_ID/APP_SECRET)."
     exit 1
   fi
 
   if [ "$conn_mode" != "long" ]; then
-    echo "[fatal] Codex bot only supports FEISHU_CONNECTION_MODE=long. Current: $conn_mode"
+    echo "[fatal] Hermes bot only supports FEISHU_CONNECTION_MODE=long. Current: $conn_mode"
     echo "[hint] edit $ENV_FILE and set FEISHU_CONNECTION_MODE=long"
     exit 1
   fi
@@ -55,7 +53,7 @@ fi
 mkdir -p "$(dirname "$LOG_FILE")"
 touch "$LOG_FILE"
 
-CMD="cd '$ROOT_DIR' && set -a && source '$ENV_FILE' && set +a && '$NODE_BIN' feishu_codex_bot.mjs >> '$LOG_FILE' 2>&1"
+CMD="cd '$ROOT_DIR' && set -a && source '$ENV_FILE' && set +a && '$NODE_BIN' feishu_hermes_bot.mjs >> '$LOG_FILE' 2>&1"
 tmux new-session -d -s "$SESSION_NAME" "$CMD"
 
 sleep 0.2
@@ -65,12 +63,7 @@ if ! tmux has-session -t "$SESSION_NAME" 2>/dev/null; then
   exit 1
 fi
 
-SESSION_NAME="feishu-tunnel" "$ROOT_DIR/scripts/feishu-tunnel-stop.sh" >/dev/null 2>&1 || true
-
-echo "[ok] started session: $SESSION_NAME"
-echo "[ok] log file: $LOG_FILE"
+SESSION_NAME="feishu-hermes-tunnel" "$ROOT_DIR/scripts/feishu-tunnel-stop.sh" >/dev/null 2>&1 || true
 echo "[ok] transport: official Feishu long connection only"
-echo "[tip] tail logs: tail -f '$LOG_FILE'"
-echo "[tip] if not working, check env: $ENV_FILE"
 
-ENV_FILE="$ENV_FILE" SESSION_NAME="$SESSION_NAME" LOG_FILE="$LOG_FILE" PORT="${PORT:-8787}" "$ROOT_DIR/scripts/feishu-bot-status.sh"
+ENV_FILE="$ENV_FILE" SESSION_NAME="$SESSION_NAME" LOG_FILE="$LOG_FILE" PORT="${PORT:-8788}" "$ROOT_DIR/scripts/feishu-hermes-status.sh"

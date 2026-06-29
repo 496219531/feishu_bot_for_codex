@@ -1,5 +1,15 @@
 .env.feishu
+.env.feishu.hermes
 .feishu-codex-bot-state.json
+.feishu-hermes-bot-state.json
 feishu-bot.log
+feishu-hermes-bot.log
 feishu-tunnel.log
 feishu-tunnel.url
+feishu-hermes-tunnel.log
+feishu-hermes-tunnel.url
+logs/
+node_modules/
+scripts/__pycache__/
+*.pyc
+.DS_Store

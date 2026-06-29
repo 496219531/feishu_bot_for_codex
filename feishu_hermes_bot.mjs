@@ -6,7 +6,11 @@ import path from "node:path";
 import { promises as fs } from "node:fs";
 import { spawn } from "node:child_process";
 import * as lark from "@larksuiteoapi/node-sdk";
-import { getCodexTopLevelValue, loadCodexConfig } from "./codex_config.mjs";
+import {
+  getCodexTopLevelValue,
+  loadCodexConfig,
+  mapCodexProviderToHermes,
+} from "./codex_config.mjs";
 
 const PORT = Number(process.env.PORT || 8787);
 const FEISHU_APP_ID = process.env.FEISHU_APP_ID || process.env.APP_ID || "";
@@ -27,25 +31,26 @@ const USER_DISPLAY_NAMES = parseUserDisplayNames(
   process.env.USER_DISPLAY_NAMES || "",
 );
 const WORKSPACE_DIR = process.env.WORKSPACE_DIR || process.cwd();
-const CODEX_BIN = process.env.CODEX_BIN || "codex";
+const HERMES_BIN = process.env.HERMES_BIN || "hermes";
 const CODEX_CONFIG = await loadCodexConfig();
-const CONFIG_MODEL = getCodexTopLevelValue(CODEX_CONFIG.data, "model");
-const CONFIG_REASONING_EFFORT = getCodexTopLevelValue(
+const CODEX_MODEL = getCodexTopLevelValue(CODEX_CONFIG.data, "model");
+const CODEX_PROVIDER = getCodexTopLevelValue(
   CODEX_CONFIG.data,
-  "model_reasoning_effort",
+  "model_provider",
 );
-const CODEX_MODEL = process.env.CODEX_MODEL || CONFIG_MODEL || "";
-const CODEX_REASONING_EFFORT =
-  process.env.CODEX_REASONING_EFFORT || CONFIG_REASONING_EFFORT || "";
-const CODEX_EXEC_MODE = (process.env.CODEX_EXEC_MODE || "full-auto")
-  .trim()
-  .toLowerCase();
+const HERMES_MODEL = process.env.HERMES_MODEL || CODEX_MODEL || "";
+const HERMES_PROVIDER =
+  process.env.HERMES_PROVIDER || mapCodexProviderToHermes(CODEX_PROVIDER) || "";
+const HERMES_TOOLSETS = process.env.HERMES_TOOLSETS || "";
+const HERMES_SKILLS = process.env.HERMES_SKILLS || "";
+const HERMES_MAX_TURNS = Number(process.env.HERMES_MAX_TURNS || 90);
+const HERMES_YOLO = /^(1|true|yes|on)$/i.test(process.env.HERMES_YOLO || "");
 const BOT_RESTART_SCRIPT =
   process.env.BOT_RESTART_SCRIPT ||
-  path.join(process.cwd(), "scripts", "feishu-bot-self-restart.sh");
+  path.join(process.cwd(), "scripts", "feishu-hermes-self-restart.sh");
 const STATE_FILE =
   process.env.STATE_FILE ||
-  path.join(process.cwd(), ".feishu-codex-bot-state.json");
+  path.join(process.cwd(), ".feishu-hermes-bot-state.json");
 const MAX_TEXT_CHARS = Number(process.env.MAX_TEXT_CHARS || 1800);
 
 if (!FEISHU_APP_ID) {
@@ -231,7 +236,7 @@ function normalizeCommandText(raw) {
 
 function buildRuntimeContext({ senderName, senderOpenId }) {
   const lines = [
-    "运行环境说明：你当前运行在本机 Codex CLI 中。",
+    "运行环境说明：你当前运行在本机 Hermes Agent 中。",
     "当前会话允许联网搜索和打开网页；如果用户的问题涉及最新信息、新闻、天气、价格、版本、文档、规则或要求你核实，请直接联网查询，不要声称自己无法联网。",
     "如果当前对话里出现过旧的“不能联网”表述，以这条最新运行环境说明为准。",
   ];
@@ -246,117 +251,152 @@ function buildRuntimeContext({ senderName, senderOpenId }) {
   return `${lines.join("\n")}\n\n用户消息：`;
 }
 
-async function runCodexTask(prompt, sessionId) {
-  const tempFile = path.join(
-    os.tmpdir(),
-    `feishu-codex-${Date.now()}-${Math.random().toString(16).slice(2)}.txt`,
-  );
+async function runHermesTask(prompt, sessionId) {
+  async function runOnce(resumeSessionId) {
+    const args = [
+      "chat",
+      "-q",
+      prompt,
+      "-Q",
+      "--accept-hooks",
+      "--source",
+      "tool",
+    ];
 
-  const sharedArgs = [
-    "--skip-git-repo-check",
-    "--json",
-    "--output-last-message",
-    tempFile,
-  ];
-  if (CODEX_EXEC_MODE !== "config") {
-    sharedArgs.push("--full-auto");
-  }
-  if (CODEX_MODEL) {
-    sharedArgs.push("--model", CODEX_MODEL);
-  }
-  if (CODEX_REASONING_EFFORT) {
-    sharedArgs.push(
-      "-c",
-      `model_reasoning_effort="${CODEX_REASONING_EFFORT}"`,
-    );
-  }
+    if (Number.isFinite(HERMES_MAX_TURNS) && HERMES_MAX_TURNS > 0) {
+      args.push("--max-turns", String(HERMES_MAX_TURNS));
+    }
+    if (HERMES_MODEL) {
+      args.push("-m", HERMES_MODEL);
+    }
+    if (HERMES_PROVIDER) {
+      args.push("--provider", HERMES_PROVIDER);
+    }
+    if (HERMES_TOOLSETS) {
+      args.push("-t", HERMES_TOOLSETS);
+    }
+    if (HERMES_SKILLS) {
+      args.push("-s", HERMES_SKILLS);
+    }
+    if (HERMES_YOLO) {
+      args.push("--yolo");
+    }
+    if (resumeSessionId) {
+      args.push("--resume", resumeSessionId);
+    }
 
-  const args = sessionId
-    ? ["exec", "resume", ...sharedArgs, sessionId, prompt]
-    : ["exec", ...sharedArgs, "--cd", WORKSPACE_DIR, prompt];
+    return await new Promise((resolve) => {
+      let stdoutBuffer = "";
+      let stderrBuffer = "";
 
-  let threadId = sessionId || "";
-  let usage = null;
-  let stdoutBuffer = "";
-  let stderrBuffer = "";
-  let fallbackText = "";
+      const child = spawn(HERMES_BIN, args, {
+        cwd: WORKSPACE_DIR,
+        env: { ...process.env, HERMES_ACCEPT_HOOKS: "1" },
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+      currentChild = child;
 
-  const result = await new Promise((resolve) => {
-    const child = spawn(CODEX_BIN, args, {
-      cwd: WORKSPACE_DIR,
-      env: { ...process.env, RUST_LOG: "error" },
-      stdio: ["ignore", "pipe", "pipe"],
-    });
-    currentChild = child;
+      child.stdout.on("data", (buf) => {
+        stdoutBuffer += buf.toString("utf8");
+      });
 
-    child.stdout.on("data", (buf) => {
-      const text = buf.toString("utf8");
-      stdoutBuffer += text;
-      let idx;
-      while ((idx = stdoutBuffer.indexOf("\n")) >= 0) {
-        const line = stdoutBuffer.slice(0, idx).trim();
-        stdoutBuffer = stdoutBuffer.slice(idx + 1);
-        if (!line.startsWith("{")) continue;
-        try {
-          const evt = JSON.parse(line);
-          if (evt.type === "thread.started" && evt.thread_id) {
-            threadId = evt.thread_id;
-          }
-          if (evt.type === "turn.completed" && evt.usage) {
-            usage = evt.usage;
-          }
-          if (
-            evt.type === "item.completed" &&
-            evt.item?.type === "agent_message" &&
-            typeof evt.item?.text === "string"
-          ) {
-            fallbackText = evt.item.text;
-          }
-        } catch {
-          // ignore invalid json line
+      child.stderr.on("data", (buf) => {
+        stderrBuffer += buf.toString("utf8");
+      });
+
+      child.on("close", (code) => {
+        currentChild = null;
+
+        const combined = stripAnsi(`${stderrBuffer}\n${stdoutBuffer}`).replace(/\r/g, "");
+        const sessionMatches = [...combined.matchAll(/^session_id:\s+(.+)$/gm)];
+        const nextSessionId = sessionMatches.length > 0
+          ? sessionMatches[sessionMatches.length - 1][1].trim()
+          : (resumeSessionId || "");
+
+        let finalText = stripHermesSessionNoise(stdoutBuffer);
+        if (!finalText) {
+          finalText = stripHermesSessionNoise(combined);
         }
-      }
-    });
+        if (!finalText && code !== 0) {
+          finalText = `执行失败 (exit=${code})\n${combined.slice(0, 1200)}`;
+        }
+        if (!finalText) {
+          finalText = "已执行，但没有拿到可读回复。";
+        }
 
-    child.stderr.on("data", (buf) => {
-      stderrBuffer += buf.toString("utf8");
-    });
-
-    child.on("close", async (code) => {
-      currentChild = null;
-      let finalText = "";
-      try {
-        finalText = (await fs.readFile(tempFile, "utf8")).trim();
-      } catch {
-        // ignore
-      }
-      try {
-        await fs.unlink(tempFile);
-      } catch {
-        // ignore
-      }
-
-      if (!finalText) finalText = fallbackText;
-      if (!finalText && code !== 0) {
-        finalText = `执行失败 (exit=${code})\n${stderrBuffer.slice(0, 1200)}`;
-      }
-      if (!finalText) {
-        finalText = "已执行，但没有拿到可读回复。";
-      }
-
-      resolve({
-        code,
-        threadId,
-        usage,
-        text: finalText,
+        resolve({
+          code,
+          sessionId: nextSessionId,
+          usage: null,
+          text: finalText,
+          combined,
+        });
       });
     });
-  });
+  }
 
-  return result;
+  const firstResult = await runOnce(sessionId);
+  if (sessionId && shouldRetryHermesFreshSession(firstResult)) {
+    log(
+      `[warn] stale hermes session detected, retrying fresh session: ${sessionId}`,
+    );
+    return await runOnce("");
+  }
+
+  return firstResult;
+}
+
+function stripAnsi(text) {
+  return text.replace(/\[[0-9;]*[A-Za-z]/g, "");
+}
+
+function stripHermesSessionNoise(text) {
+  return text
+    .split("\n")
+    .filter((line) => {
+      const trimmed = line.trim();
+      if (!trimmed) return false;
+      if (trimmed.startsWith("session_id:")) return false;
+      if (trimmed.startsWith("↻ Resumed session ")) return false;
+      return true;
+    })
+    .join("\n")
+    .trim();
+}
+
+function shouldRetryHermesFreshSession(result) {
+  const combined = result?.combined || "";
+  const text = result?.text || "";
+
+  if (/Session not found:/i.test(combined)) {
+    return true;
+  }
+
+  const resumedOnly =
+    /↻ Resumed session /i.test(combined) &&
+    /^session_id:\s+/m.test(combined) &&
+    !stripHermesSessionNoise(combined);
+
+  if (resumedOnly) {
+    return true;
+  }
+
+  if (
+    result?.code !== 0 &&
+    (
+      text === "已执行，但没有拿到可读回复。" ||
+      /^执行失败 \(exit=\d+\)\s*$/m.test(text) ||
+      !stripHermesSessionNoise(combined)
+    )
+  ) {
+    return true;
+  }
+
+  return false;
 }
 
 async function scheduleBotRestart() {
+
   await fs.access(BOT_RESTART_SCRIPT);
 
   const child = spawn(BOT_RESTART_SCRIPT, [], {
@@ -397,7 +437,7 @@ async function handleUserText(task) {
         "/cancel 取消当前正在执行的任务",
         "/restartbot 重启长连接 bot",
         "",
-        "直接发自然语言就是给 Codex 的指令。",
+        "直接发自然语言就是给 Hermes 的指令。",
       ].join("\n"),
     );
     return;
@@ -409,7 +449,7 @@ async function handleUserText(task) {
     const runningText = running ? "running" : "idle";
     await sendFeishuText(
       chatId,
-      `状态:\nworkspace=${WORKSPACE_DIR}\nthread=${sid}\nqueue=${q}\nworker=${runningText}`,
+      `状态:\nworkspace=${WORKSPACE_DIR}\nsession=${sid}\nqueue=${q}\nworker=${runningText}`,
     );
     return;
   }
@@ -496,9 +536,9 @@ async function processQueue() {
     })}\n${prompt}`;
 
     try {
-      const result = await runCodexTask(promptWithUser, sessionId);
-      if (result.threadId) {
-        state.sessions[conversationKey] = result.threadId;
+      const result = await runHermesTask(promptWithUser, sessionId);
+      if (result.sessionId) {
+        state.sessions[conversationKey] = result.sessionId;
         await persistState();
       }
 
@@ -656,7 +696,7 @@ async function handleLongConnectionEvent(data) {
 const server = http.createServer(async (req, res) => {
   try {
     if (req.method === "GET" && req.url === "/healthz") {
-  return safeJson(res, {
+      return safeJson(res, {
         ok: true,
         running,
         queue: queue.length,
@@ -760,7 +800,7 @@ function toIso(ms) {
 await ensureStateLoaded();
 
 server.listen(PORT, async () => {
-  log(`[ready] Feishu Codex bot listening on :${PORT}`);
+  log(`[ready] Feishu Hermes bot listening on :${PORT}`);
   log(`[ready] mode: ${FEISHU_CONNECTION_MODE}`);
   if (FEISHU_CONNECTION_MODE === "long") {
     log(`[ready] health only: GET /healthz`);
@@ -768,25 +808,30 @@ server.listen(PORT, async () => {
     log(`[ready] callback path: POST /feishu/events`);
   }
   log(`[ready] workspace: ${WORKSPACE_DIR}`);
-  log(`[ready] codex_exec_mode: ${CODEX_EXEC_MODE === "config" ? "config" : "full-auto"}`);
+  log(`[ready] hermes_bin: ${HERMES_BIN}`);
   log(
-    `[ready] codex_model_source: ${
-      process.env.CODEX_MODEL
-        ? `env(${process.env.CODEX_MODEL})`
-        : CONFIG_MODEL
-          ? `${CODEX_CONFIG.path} -> ${CONFIG_MODEL}`
+    `[ready] hermes_provider_source: ${
+      process.env.HERMES_PROVIDER
+        ? `env(${process.env.HERMES_PROVIDER})`
+        : CODEX_PROVIDER
+          ? `${CODEX_CONFIG.path} -> ${CODEX_PROVIDER}`
           : "(default)"
     }`,
   );
   log(
-    `[ready] codex_reasoning_source: ${
-      process.env.CODEX_REASONING_EFFORT
-        ? `env(${process.env.CODEX_REASONING_EFFORT})`
-        : CONFIG_REASONING_EFFORT
-          ? `${CODEX_CONFIG.path} -> ${CONFIG_REASONING_EFFORT}`
+    `[ready] hermes_model_source: ${
+      process.env.HERMES_MODEL
+        ? `env(${process.env.HERMES_MODEL})`
+        : CODEX_MODEL
+          ? `${CODEX_CONFIG.path} -> ${CODEX_MODEL}`
           : "(default)"
     }`,
   );
+  log(`[ready] hermes_provider: ${HERMES_PROVIDER || "(default)"}`);
+  log(`[ready] hermes_model: ${HERMES_MODEL || "(default)"}`);
+  log(`[ready] hermes_toolsets: ${HERMES_TOOLSETS || "(default)"}`);
+  log(`[ready] hermes_max_turns: ${HERMES_MAX_TURNS}`);
+  log(`[ready] hermes_yolo: ${HERMES_YOLO ? "on" : "off"}`);
   log(
     `[ready] allowed_open_ids: ${
       ALLOWED_OPEN_IDS.size > 0 ? [...ALLOWED_OPEN_IDS].join(",") : "(all)"
